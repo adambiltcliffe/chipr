@@ -57,6 +57,21 @@ impl Chip {
                 desc = Some(format!("jump to {:03X}", nnn).to_owned());
                 self.pc = nnn;
             }
+            0x3 => {
+                desc = Some(format!("skip if register {:X} equals {:02X}", x, nn));
+                if self.regs[x as usize] == nn {
+                    self.pc += 2;
+                }
+            }
+            0x4 => {
+                desc = Some(format!(
+                    "skip if register {:X} does not equal {:02X}",
+                    x, nn
+                ));
+                if self.regs[x as usize] != nn {
+                    self.pc += 2;
+                }
+            }
             0x6 => {
                 desc = Some(format!("set register {:X} to {:02X}", x, nn));
                 self.regs[x as usize] = nn;
@@ -64,8 +79,45 @@ impl Chip {
             0x7 => {
                 desc = Some(format!("increase register {:X} by {:02X}", x, nn));
                 let r = &mut self.regs[x as usize];
-                *r = (*r + nn) % 0xff;
+                *r = r.wrapping_add(nn);
             }
+            0x8 => match n {
+                0x0 => {
+                    desc = Some(format!("set register {:X} to value in register {:X}", x, y));
+                    self.regs[x as usize] = self.regs[y as usize];
+                }
+                0x1 => {
+                    desc = Some(format!(
+                        "OR register {:X} with value in register {:X}",
+                        x, y
+                    ));
+                    self.regs[x as usize] |= self.regs[y as usize];
+                }
+                0x2 => {
+                    desc = Some(format!(
+                        "AND register {:X} with value in register {:X}",
+                        x, y
+                    ));
+                    self.regs[x as usize] &= self.regs[y as usize];
+                }
+                0x3 => {
+                    desc = Some(format!(
+                        "XOR register {:X} with value in register {:X}",
+                        x, y
+                    ));
+                    self.regs[x as usize] ^= self.regs[y as usize];
+                }
+                0x4 => {
+                    desc = Some(format!(
+                        "Increase register {:X} by value in register {:X}",
+                        x, y
+                    ));
+                    let result = self.regs[x as usize] as u16 + self.regs[y as usize] as u16;
+                    self.regs[x as usize] = (result & 0xff) as u8;
+                    self.regs[0xf] = if result > 0xff { 1 } else { 0 };
+                }
+                _ => (),
+            },
             0xA => {
                 desc = Some(format!("set index register to {:03X}", nnn));
                 self.ir = nnn;
@@ -89,7 +141,11 @@ impl Chip {
                             break;
                         }
                         let pixel = &mut self.screen[py + dy][px + dx];
-                        *pixel = (data >> (7 - dx)) & 1 == 1;
+                        let draw = (data >> (7 - dx)) & 1 == 1;
+                        if *pixel && draw {
+                            self.regs[0xf] = 1;
+                        }
+                        *pixel = *pixel ^ draw;
                     }
                 }
             }
