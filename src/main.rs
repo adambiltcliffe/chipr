@@ -1,9 +1,26 @@
 const HZ: u32 = 700;
 const DHZ: u32 = 60;
 
+struct CompatibilityOptions {
+    shift_ignores_vy: bool,
+    no_increment: bool,
+    jump_table_variant: bool,
+}
+
+impl Default for CompatibilityOptions {
+    fn default() -> Self {
+        Self {
+            shift_ignores_vy: false,
+            no_increment: false,
+            jump_table_variant: false,
+        }
+    }
+}
+
 type Addr = usize;
 
 struct Chip {
+    opts: CompatibilityOptions,
     mem: Vec<u8>,
     pc: Addr,
     ir: Addr,
@@ -12,13 +29,15 @@ struct Chip {
     st: u8,
     regs: [u8; 16],
     screen: [[bool; 64]; 32],
+    halted: bool,
 }
 
 impl Chip {
-    fn new(rom: Vec<u8>) -> Self {
+    fn new(rom: Vec<u8>, opts: CompatibilityOptions) -> Self {
         let mut mem: Vec<u8> = [0; 0x200].into();
         mem.extend(rom);
         Self {
+            opts,
             mem,
             pc: 0x200,
             ir: 0,
@@ -27,6 +46,7 @@ impl Chip {
             st: 0,
             regs: [0; 16],
             screen: [[false; 64]; 32],
+            halted: false,
         }
     }
 
@@ -39,10 +59,12 @@ impl Chip {
         let n: u8 = b2 & 0x0f;
         let nn: u8 = b2;
         let nnn: usize = (((b1 & 0x0f) as u16 * 256) | (b2 as u16)) as usize;
-        print!(
-            "[{:03x}] {:02X}{:02X} op={:X} x={:X} y={:X} n={:X} nn={:02X} nnn={:03X} ",
-            self.pc, b1, b2, opcode, x, y, n, nn, nnn
-        );
+        if !self.halted {
+            print!(
+                "[{:03x}] {:02X}{:02X} op={:X} x={:X} y={:X} n={:X} nn={:02X} nnn={:03X} ",
+                self.pc, b1, b2, opcode, x, y, n, nn, nnn
+            )
+        }
         self.pc += 2;
         let mut desc: Option<String> = None;
         let mut drew = false;
@@ -55,6 +77,9 @@ impl Chip {
             }
             0x1 => {
                 desc = Some(format!("jump to {:03X}", nnn).to_owned());
+                if self.pc == nnn + 2 {
+                    self.halted = true
+                }
                 self.pc = nnn;
             }
             0x3 => {
@@ -116,6 +141,53 @@ impl Chip {
                     self.regs[x as usize] = (result & 0xff) as u8;
                     self.regs[0xf] = if result > 0xff { 1 } else { 0 };
                 }
+                0x5 | 0x7 => {
+                    let (m, s) = if n == 0x5 {
+                        desc = Some(format!(
+                            "Subtract register {:X} from register {:X} and store in register {:X}",
+                            y, x, x
+                        ));
+                        (self.regs[x as usize], self.regs[y as usize])
+                    } else {
+                        desc = Some(format!(
+                            "Subtract register {:X} from register {:X} and store in register {:X}",
+                            x, y, x
+                        ));
+                        (self.regs[y as usize], self.regs[x as usize])
+                    };
+                    self.regs[x as usize] = m.wrapping_sub(s);
+                    self.regs[0xf] = if s > m { 0 } else { 1 };
+                }
+                0x6 => {
+                    let v = if self.opts.shift_ignores_vy {
+                        desc = Some(format!("Shift register {:X} right (*)", x));
+                        self.regs[x as usize]
+                    } else {
+                        desc = Some(format!(
+                            "Shift register {:X} right and store in register {:X} (*)",
+                            y, x
+                        ));
+                        self.regs[x as usize]
+                    };
+                    let flag = v & 0x1;
+                    self.regs[x as usize] = v >> 1;
+                    self.regs[0xf] = flag;
+                }
+                0xe => {
+                    let v = if self.opts.shift_ignores_vy {
+                        desc = Some(format!("Shift register {:X} left (*)", x));
+                        self.regs[x as usize]
+                    } else {
+                        desc = Some(format!(
+                            "Shift register {:X} left and store in register {:X} (*)",
+                            y, x
+                        ));
+                        self.regs[x as usize]
+                    };
+                    let flag = (v & 0b10000000) >> 7;
+                    self.regs[x as usize] = (v << 1) & 0xff;
+                    self.regs[0xf] = flag;
+                }
                 _ => (),
             },
             0xA => {
@@ -151,21 +223,33 @@ impl Chip {
             }
             _ => (),
         }
-        match desc {
-            None => println!("unknown opcode"),
-            Some(d) => println!("{}", d),
+        if !self.halted {
+            match desc {
+                None => println!("unknown opcode"),
+                Some(d) => println!("{}", d),
+            }
         }
         drew
     }
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() != 2 {
-        panic!("expected a single argument")
+    let mut opts = CompatibilityOptions::default();
+    let mut a = std::env::args().skip(1);
+    let filename = match a.next() {
+        None => panic!("expected at least one argument"),
+        Some(arg) => arg,
+    };
+    for arg in a {
+        if arg == "--shift" {
+            println!("Super-Chip compatibility: 8XY6 and 8XYE ignore their second operand");
+            opts.shift_ignores_vy = true;
+        } else {
+            panic!("unknown argument")
+        }
     }
-    let bytes = std::fs::read(&args[1]).expect("could not read ROM file");
-    let mut chip = Chip::new(bytes);
+    let bytes = std::fs::read(filename).expect("could not read ROM file");
+    let mut chip = Chip::new(bytes, opts);
     println!("{} bytes in memory", chip.mem.len());
 
     let event_loop = winit::event_loop::EventLoop::new();
@@ -187,6 +271,7 @@ fn main() {
     };
     let start = std::time::Instant::now();
     let mut spent = std::time::Duration::from_secs(0);
+    let mut halt_detected = false;
     event_loop.run(move |event, _, control_flow| {
         if let winit::event::Event::RedrawRequested(_) = event {
             for (y, row) in pixels.get_frame().chunks_exact_mut(64 * 4).enumerate() {
@@ -220,6 +305,10 @@ fn main() {
         }
         if redraw {
             window.request_redraw();
+        }
+        if chip.halted && !halt_detected {
+            halt_detected = true;
+            println!("(program entered an infinite loop)");
         }
     })
 }
