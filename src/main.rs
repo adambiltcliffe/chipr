@@ -50,7 +50,7 @@ impl Chip {
         }
     }
 
-    fn step(&mut self) -> bool {
+    fn step(&mut self, input: &winit_input_helper::WinitInputHelper) -> bool {
         let b1 = self.mem[self.pc];
         let b2 = self.mem[self.pc + 1];
         let opcode: u8 = (b1 & 0xf0) >> 4;
@@ -242,6 +242,14 @@ impl Chip {
                 }
                 self.pc = dest;
             }
+            0xC => {
+                let result: u8 = rand::random::<u8>() & nn;
+                desc = Some(format!(
+                    "store random number with mask {:02X} in register {:X} (result: {:02X})",
+                    nn, x, result
+                ));
+                self.regs[x as usize] = result;
+            }
             0xD => {
                 desc = Some(format!(
                     "draw {} rows with X={:X}, Y={:X} ({},{})",
@@ -269,6 +277,51 @@ impl Chip {
                     }
                 }
             }
+            0xE => {
+                let keycode = get_key_code(self.regs[x as usize]);
+                if nn == 0x9E {
+                    desc = Some(format!(
+                        "skip if key in register {:X} ({:?}) is pressed",
+                        x, keycode
+                    ));
+                    if input.key_held(keycode) {
+                        self.pc += 2
+                    }
+                } else if nn == 0xA1 {
+                    desc = Some(format!(
+                        "skip if key in register {:X} ({:?}) is not pressed",
+                        x, keycode
+                    ));
+                    if !input.key_held(keycode) {
+                        self.pc += 2
+                    }
+                }
+            }
+            0xF => {
+                if nn == 0x07 {
+                    desc = Some(format!("store delay timer in register {:X}", x));
+                    self.regs[x as usize] = self.dt;
+                } else if nn == 0x0A {
+                    desc = Some(format!("wait for input and save key in register {:X}", x));
+                    let mut pressed = false;
+                    for k in 0..16 {
+                        if input.key_held(get_key_code(k)) {
+                            self.regs[x as usize] = k;
+                            pressed = true;
+                            break;
+                        }
+                    }
+                    if !pressed {
+                        self.pc -= 2;
+                    }
+                } else if nn == 0x15 {
+                    desc = Some(format!("set delay timer to value in register {:X}", x));
+                    self.dt = self.regs[x as usize];
+                } else if nn == 0x18 {
+                    desc = Some(format!("set sound timer to value in register {:X}", x));
+                    self.st = self.regs[x as usize];
+                }
+            }
             _ => (),
         }
         if !self.halted {
@@ -278,6 +331,30 @@ impl Chip {
             }
         }
         drew
+    }
+}
+
+use winit::event::VirtualKeyCode;
+
+fn get_key_code(n: u8) -> VirtualKeyCode {
+    match n {
+        0 => VirtualKeyCode::X,
+        1 => VirtualKeyCode::Key1,
+        2 => VirtualKeyCode::Key2,
+        3 => VirtualKeyCode::Key3,
+        4 => VirtualKeyCode::Q,
+        5 => VirtualKeyCode::W,
+        6 => VirtualKeyCode::E,
+        7 => VirtualKeyCode::A,
+        8 => VirtualKeyCode::S,
+        9 => VirtualKeyCode::D,
+        0xA => VirtualKeyCode::Z,
+        0xB => VirtualKeyCode::C,
+        0xC => VirtualKeyCode::Key4,
+        0xD => VirtualKeyCode::R,
+        0xE => VirtualKeyCode::F,
+        0xF => VirtualKeyCode::V,
+        _ => unreachable!(),
     }
 }
 
@@ -325,6 +402,7 @@ fn main() {
     let start = std::time::Instant::now();
     let mut spent = std::time::Duration::from_secs(0);
     let mut halt_detected = false;
+    let mut timer_delay = std::time::Duration::from_secs(0);
     event_loop.run(move |event, _, control_flow| {
         if let winit::event::Event::RedrawRequested(_) = event {
             for (y, row) in pixels.get_frame().chunks_exact_mut(64 * 4).enumerate() {
@@ -349,11 +427,24 @@ fn main() {
         }
         let mut redraw = false;
         while std::time::Instant::now().duration_since(start) > spent {
-            if chip.step() {
-                spent += std::time::Duration::from_secs(1) / HZ;
+            let t;
+            if chip.step(&input) {
+                t = std::time::Duration::from_secs(1) / HZ;
                 redraw = true;
             } else {
-                spent += std::time::Duration::from_secs(1) / DHZ;
+                t = std::time::Duration::from_secs(1) / DHZ;
+            }
+            spent += t;
+            timer_delay += t;
+        }
+        let frame = std::time::Duration::from_secs_f32(1. / 60.);
+        while timer_delay > frame {
+            timer_delay = timer_delay.saturating_sub(frame);
+            if chip.dt > 0 {
+                chip.dt -= 1
+            }
+            if chip.st > 0 {
+                chip.st -= 1
             }
         }
         if redraw {
