@@ -73,13 +73,26 @@ impl Chip {
                 if nnn == 0x0e0 {
                     desc = Some("clear screen".to_owned());
                     self.screen = [[false; 64]; 32];
+                } else if nnn == 0x0ee {
+                    desc = Some("return".to_owned());
+                    match self.stack.pop() {
+                        None => {
+                            println!("error: stack underflow (return instruction skipped")
+                        }
+                        Some(addr) => self.pc = addr,
+                    }
                 }
             }
             0x1 => {
-                desc = Some(format!("jump to {:03X}", nnn).to_owned());
+                desc = Some(format!("jump to {:03X}", nnn));
                 if self.pc == nnn + 2 {
                     self.halted = true
                 }
+                self.pc = nnn;
+            }
+            0x2 => {
+                desc = Some(format!("call subroutine at {:03X}", nnn));
+                self.stack.push(self.pc);
                 self.pc = nnn;
             }
             0x3 => {
@@ -94,6 +107,12 @@ impl Chip {
                     x, nn
                 ));
                 if self.regs[x as usize] != nn {
+                    self.pc += 2;
+                }
+            }
+            0x5 => {
+                desc = Some(format!("skip if register {:X} equals register {:X}", x, y));
+                if self.regs[x as usize] == self.regs[y as usize] {
                     self.pc += 2;
                 }
             }
@@ -190,9 +209,38 @@ impl Chip {
                 }
                 _ => (),
             },
+            0x9 => {
+                desc = Some(format!(
+                    "skip if register {:X} does not equal register {:X}",
+                    x, y
+                ));
+                if self.regs[x as usize] != self.regs[y as usize] {
+                    self.pc += 2;
+                }
+            }
             0xA => {
                 desc = Some(format!("set index register to {:03X}", nnn));
                 self.ir = nnn;
+            }
+            0xB => {
+                let offs = if self.opts.jump_table_variant {
+                    desc = Some(format!(
+                        "jump by table at {:03X} using value in register {:X} (*)",
+                        nnn, x
+                    ));
+                    self.regs[x as usize]
+                } else {
+                    desc = Some(format!(
+                        "jump by table at {:03X} using value in register 0 (*)",
+                        nnn
+                    ));
+                    self.regs[0]
+                };
+                let dest = nnn + offs as usize;
+                if dest == self.pc - 2 {
+                    self.halted = true
+                }
+                self.pc = dest;
             }
             0xD => {
                 desc = Some(format!(
@@ -244,6 +292,11 @@ fn main() {
         if arg == "--shift" {
             println!("Super-Chip compatibility: 8XY6 and 8XYE ignore their second operand");
             opts.shift_ignores_vy = true;
+        } else if arg == "--jump" {
+            println!(
+                "Super-Chip compatibility: BNNN uses VX rather than V0 for the jump table index"
+            );
+            opts.jump_table_variant = true;
         } else {
             panic!("unknown argument")
         }
