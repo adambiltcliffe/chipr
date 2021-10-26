@@ -1,5 +1,5 @@
 const HZ: u32 = 700;
-const DHZ: u32 = 60;
+const DHZ: u32 = 700;
 
 struct CompatibilityOptions {
     shift_ignores_vy: bool,
@@ -29,13 +29,31 @@ struct Chip {
     st: u8,
     regs: [u8; 16],
     screen: [[bool; 64]; 32],
-    halted: bool,
+    muted: bool,
 }
 
 impl Chip {
     fn new(rom: Vec<u8>, opts: CompatibilityOptions) -> Self {
-        let mut mem: Vec<u8> = [0; 0x200].into();
-        mem.extend(rom);
+        let mut mem: Vec<u8> = [0; 4096].into();
+        mem[0x50..0xA0].copy_from_slice(&[
+            0xF0, 0x90, 0x90, 0x90, 0xF0, // 0
+            0x20, 0x60, 0x20, 0x20, 0x70, // 1
+            0xF0, 0x10, 0xF0, 0x80, 0xF0, // 2
+            0xF0, 0x10, 0xF0, 0x10, 0xF0, // 3
+            0x90, 0x90, 0xF0, 0x10, 0x10, // 4
+            0xF0, 0x80, 0xF0, 0x10, 0xF0, // 5
+            0xF0, 0x80, 0xF0, 0x90, 0xF0, // 6
+            0xF0, 0x10, 0x20, 0x40, 0x40, // 7
+            0xF0, 0x90, 0xF0, 0x90, 0xF0, // 8
+            0xF0, 0x90, 0xF0, 0x10, 0xF0, // 9
+            0xF0, 0x90, 0xF0, 0x90, 0x90, // A
+            0xE0, 0x90, 0xE0, 0x90, 0xE0, // B
+            0xF0, 0x80, 0x80, 0x80, 0xF0, // C
+            0xE0, 0x90, 0x90, 0x90, 0xE0, // D
+            0xF0, 0x80, 0xF0, 0x80, 0xF0, // E
+            0xF0, 0x80, 0xF0, 0x80, 0x80, // F
+        ]);
+        mem[0x200..(0x200 + rom.len())].copy_from_slice(&rom);
         Self {
             opts,
             mem,
@@ -46,7 +64,7 @@ impl Chip {
             st: 0,
             regs: [0; 16],
             screen: [[false; 64]; 32],
-            halted: false,
+            muted: false,
         }
     }
 
@@ -59,7 +77,7 @@ impl Chip {
         let n: u8 = b2 & 0x0f;
         let nn: u8 = b2;
         let nnn: usize = (((b1 & 0x0f) as u16 * 256) | (b2 as u16)) as usize;
-        if !self.halted {
+        if !self.muted {
             print!(
                 "[{:03x}] {:02X}{:02X} op={:X} x={:X} y={:X} n={:X} nn={:02X} nnn={:03X} ",
                 self.pc, b1, b2, opcode, x, y, n, nn, nnn
@@ -86,7 +104,7 @@ impl Chip {
             0x1 => {
                 desc = Some(format!("jump to {:03X}", nnn));
                 if self.pc == nnn + 2 {
-                    self.halted = true
+                    self.muted = true
                 }
                 self.pc = nnn;
             }
@@ -238,7 +256,7 @@ impl Chip {
                 };
                 let dest = nnn + offs as usize;
                 if dest == self.pc - 2 {
-                    self.halted = true
+                    self.muted = true
                 }
                 self.pc = dest;
             }
@@ -320,14 +338,53 @@ impl Chip {
                 } else if nn == 0x18 {
                     desc = Some(format!("set sound timer to value in register {:X}", x));
                     self.st = self.regs[x as usize];
+                } else if nn == 0x1E {
+                    desc = Some(format!("add value in register {:X} to index register", x));
+                    let sum = self.ir as u16 + self.regs[x as usize] as u16;
+                    self.ir = (sum & 0xfff) as Addr;
+                    self.regs[0xf] = ((sum & 0x1000) >> 12) as u8;
+                } else if nn == 0x29 {
+                    desc = Some(format!(
+                        "set index register to address of character for register {:X}",
+                        x
+                    ));
+                    let val = (self.regs[x as usize] & 0xf) as usize;
+                    self.ir = 0x50 + val * 5;
+                } else if nn == 0x33 {
+                    desc = Some(format!("write BCD value in register {:X} to memory", x));
+                    let val = self.regs[x as usize];
+                    self.mem[self.ir] = val / 100;
+                    self.mem[self.ir + 1] = (val % 100) / 10;
+                    self.mem[self.ir + 2] = val % 10;
+                } else if nn == 0x55 {
+                    desc = Some(format!("store values in first {} registers to memory", x));
+                    for i in 0..=(x as usize) {
+                        self.mem[self.ir + i] = self.regs[i];
+                    }
+                    if !self.opts.no_increment {
+                        self.ir += x as usize;
+                    }
+                } else if nn == 0x65 {
+                    desc = Some(format!(
+                        "load values from first {} registers into memory",
+                        x
+                    ));
+                    for i in 0..=(x as usize) {
+                        self.regs[i] = self.mem[self.ir + i];
+                    }
+                    if !self.opts.no_increment {
+                        self.ir += x as usize;
+                    }
                 }
             }
             _ => (),
         }
-        if !self.halted {
-            match desc {
-                None => println!("unknown opcode"),
-                Some(d) => println!("{}", d),
+        match desc {
+            None => println!("unknown opcode"),
+            Some(d) => {
+                if !self.muted {
+                    println!("{}", d)
+                }
             }
         }
         drew
@@ -365,8 +422,12 @@ fn main() {
         None => panic!("expected at least one argument"),
         Some(arg) => arg,
     };
+    let mut quiet = false;
     for arg in a {
-        if arg == "--shift" {
+        if arg == "--quiet" {
+            println!("Quiet mode");
+            quiet = true;
+        } else if arg == "--shift" {
             println!("Super-Chip compatibility: 8XY6 and 8XYE ignore their second operand");
             opts.shift_ignores_vy = true;
         } else if arg == "--jump" {
@@ -374,12 +435,16 @@ fn main() {
                 "Super-Chip compatibility: BNNN uses VX rather than V0 for the jump table index"
             );
             opts.jump_table_variant = true;
+        } else if arg == "--no-inc" {
+            println!("Super-Chip compatibility: FX55 and FX65 do not modify the index register");
+            opts.no_increment = true;
         } else {
             panic!("unknown argument")
         }
     }
     let bytes = std::fs::read(filename).expect("could not read ROM file");
     let mut chip = Chip::new(bytes, opts);
+    chip.muted = quiet;
     println!("{} bytes in memory", chip.mem.len());
 
     let event_loop = winit::event_loop::EventLoop::new();
@@ -401,7 +466,6 @@ fn main() {
     };
     let start = std::time::Instant::now();
     let mut spent = std::time::Duration::from_secs(0);
-    let mut halt_detected = false;
     let mut timer_delay = std::time::Duration::from_secs(0);
     event_loop.run(move |event, _, control_flow| {
         if let winit::event::Event::RedrawRequested(_) = event {
@@ -449,10 +513,6 @@ fn main() {
         }
         if redraw {
             window.request_redraw();
-        }
-        if chip.halted && !halt_detected {
-            halt_detected = true;
-            println!("(program entered an infinite loop)");
         }
     })
 }
